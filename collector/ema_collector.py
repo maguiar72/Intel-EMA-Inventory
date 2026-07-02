@@ -114,6 +114,14 @@ def parse_dt(value):
         return None
 
 
+def is_connected(ep):
+    """True se o endpoint aparenta estar conectado ao EMA (via agente ou
+    CIRA/AMT). Condicao necessaria p/ a consulta de hardware AMT em tempo
+    real ter chance de retornar dados (hardware nao fica no banco do EMA).
+    """
+    return bool(pick(ep, 'isConnected')) or bool(pick(ep, 'isCiraConnected'))
+
+
 # ---------------------------------------------------------------------------
 #  Cliente da API EMA
 # ---------------------------------------------------------------------------
@@ -576,46 +584,49 @@ def run(config_path):
         logging.info("Coletando endpoints/dispositivos...")
         endpoints = client.get_list('endpoints')
         endpoint_ids = []
+        connected_ids = []
         for ep in endpoints:
             if db.upsert_endpoint(ep, run_id):
                 counts['endpoints'] += 1
                 eid = pick(ep, 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
                 if eid:
-                    endpoint_ids.append(str(eid))
+                    eid = str(eid)
+                    endpoint_ids.append(eid)
+                    if is_connected(ep):
+                        connected_ids.append(eid)
             if counts['endpoints'] % 200 == 0:
                 db.commit()
         db.commit()
-        logging.info("Endpoints coletados: %s", counts['endpoints'])
+        logging.info("Endpoints coletados: %s (conectados: %s)",
+                     counts['endpoints'], len(connected_ids))
 
         # --- Inventario de hardware por dispositivo ----------------------
-        if cfg['ema'].getboolean('collect_hardware', fallback=True) and endpoint_ids:
-            # Sonda o 1o host: se nenhum caminho de hardware responder (todos
-            # 404), o recurso nao existe nesta versao do EMA. Abortamos a etapa
-            # em vez de disparar ~4 x N requisicoes 404 inuteis (antes: ~45k
-            # chamadas / ~150s desperdicados retornando hardware=0).
-            first_hw = fetch_hardware(client, endpoint_ids[0])
-            if first_hw is None:
-                logging.warning(
-                    "Nenhum caminho de hardware respondeu para o host de amostra "
-                    "(%s); esta versao do EMA nao expoe inventario por sub-recurso. "
-                    "Pulando etapa de hardware. Rode com --debug-probe para revisar "
-                    "os caminhos, ou desative collect_hardware no config.ini.",
-                    endpoint_ids[0])
+        # Hardware NAO fica no banco do EMA: e lido do Intel AMT em tempo real
+        # (GET endpoints/{id}/HardwareInfoFromAmt) e so responde p/ hosts
+        # CONECTADOS com AMT provisionada. Por isso consultamos apenas os
+        # conectados, e nao os 11 mil (a maioria offline).
+        if cfg['ema'].getboolean('collect_hardware', fallback=True):
+            if not connected_ids:
+                logging.info("Nenhum endpoint conectado no momento; hardware AMT "
+                             "(tempo real) nao e coletavel agora.")
             else:
-                logging.info("Coletando inventario de hardware (%s hosts)...",
-                             len(endpoint_ids))
-                db.upsert_hardware(endpoint_ids[0], first_hw, run_id)
-                counts['hardware'] += 1
-                for i, eid in enumerate(endpoint_ids[1:], 2):
+                logging.info("Coletando hardware AMT em tempo real de %s host(s) "
+                             "conectado(s)...", len(connected_ids))
+                for i, eid in enumerate(connected_ids, 1):
                     hw = fetch_hardware(client, eid)
                     if hw:
                         db.upsert_hardware(eid, hw, run_id)
                         counts['hardware'] += 1
-                    if i % 100 == 0:
+                    if i % 50 == 0:
                         db.commit()
-                        logging.info("  ...hardware %s/%s", i, len(endpoint_ids))
+                        logging.info("  ...hardware %s/%s", i, len(connected_ids))
                 db.commit()
-                logging.info("Hardware coletado: %s", counts['hardware'])
+                logging.info("Hardware coletado: %s de %s conectados",
+                             counts['hardware'], len(connected_ids))
+                if counts['hardware'] == 0:
+                    logging.warning(
+                        "Nenhum host conectado retornou hardware. Verifique o "
+                        "caminho com: --debug-probe --probe-endpoint <ID conectado>.")
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)
@@ -637,6 +648,7 @@ def hardware_path_candidates(eid):
     ('amtSetups/endpoints/{id}').
     """
     subresources = [
+        'HardwareInfoFromAmt',  # caminho oficial (script Intel)
         'HardwareInfo', 'hardwareInfo', 'HardwareInformation', 'hardwareInformation',
         'hardware', 'Hardware', 'hardwareAssets', 'HardwareAssets',
         'amtHardwareInfo', 'AmtHardwareInfo', 'amtHardwareAssets',
@@ -724,12 +736,18 @@ def debug_probe(config_path, probe_endpoint=None):
 
 
 def fetch_hardware(client, endpoint_id):
-    """Tenta os caminhos conhecidos de inventario de hardware do EMA."""
+    """Le o inventario de hardware AMT (em tempo real) de um endpoint.
+
+    Caminho oficial (script Intel Get-IntelEMAEndpointAMTHardwareInfo):
+    GET endpoints/{id}/HardwareInfoFromAmt. O dado nao fica no banco do
+    EMA -- e consultado no Intel AMT no momento da chamada -- entao so
+    retorna se o dispositivo estiver conectado e com AMT provisionada.
+    Os demais sao fallbacks p/ outras versoes/nomenclaturas.
+    """
     candidates = [
+        f"endpoints/{endpoint_id}/HardwareInfoFromAmt",
         f"endpoints/{endpoint_id}/HardwareInfo",
         f"endpoints/{endpoint_id}/hardwareInfo",
-        f"endpoints/{endpoint_id}/hardware",
-        f"endpoints/{endpoint_id}/amtHardwareInfo",
     ]
     for path in candidates:
         try:
