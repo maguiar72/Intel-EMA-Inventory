@@ -1,0 +1,7 @@
+# Agendamento do coletor Intel EMA
+# Copie para /etc/cron.d/ema-inventory  (ajuste caminhos e usuario)
+#
+# Formato: min hora dia mes dia-semana usuario comando
+#
+# Coleta a cada 4 horas:
+0 */4 * * *  www-data  /usr/bin/python3 /var/www/ema-inventory/collector/ema_collector.py --config /var/www/ema-inventory/config.ini >> /var/log/ema-inventory/cron.log 2>&1

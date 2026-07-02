@@ -1,0 +1,8 @@
+config.ini
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+vendor/
+composer.lock

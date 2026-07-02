@@ -1,0 +1,12 @@
+{
+    "name": "ema/inventory",
+    "description": "Painel de inventario/relatorios do Intel EMA (exportacao Excel via PhpSpreadsheet)",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "phpoffice/phpspreadsheet": "^1.29 || ^2.0 || ^3.0"
+    },
+    "config": {
+        "vendor-dir": "vendor"
+    }
+}
