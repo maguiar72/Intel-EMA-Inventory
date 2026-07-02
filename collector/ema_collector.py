@@ -122,6 +122,58 @@ def is_connected(ep):
     return bool(pick(ep, 'isConnected')) or bool(pick(ep, 'isCiraConnected'))
 
 
+def extract_hardware_fields(hw):
+    """Extrai as colunas indexadas do JSON do HardwareInfoFromAmt.
+
+    O JSON e aninhado; CPU, memoria e armazenamento vem como LISTAS:
+      AmtPlatformInfo.{ManufacturerName,ComputerModel,SerialNumber}
+      AmtBiosInfo.VersionNumber
+      AmtProcessorInfo[].Version            (lista; usa o 1o)
+      AmtMemoryModuleInfo[].Size (KB)       (lista; soma -> GB)
+    O `raw` continua guardando o objeto completo.
+    """
+    if not isinstance(hw, dict):
+        hw = {}
+
+    # CPU: 1o processador da lista (com fallback p/ formatos planos).
+    cpu = None
+    procs = hw.get('AmtProcessorInfo')
+    if isinstance(procs, list) and procs and isinstance(procs[0], dict):
+        cpu = pick(procs[0], 'Version', 'ProcessorName', 'ManufacturerName')
+    if not cpu:
+        cpu = pick(hw, 'processor', 'cpu', 'processorName', 'cpuDescription')
+
+    # Memoria: soma o Size (KB) dos modulos e converte p/ GB.
+    total_mem = None
+    mods = hw.get('AmtMemoryModuleInfo')
+    if isinstance(mods, list) and mods:
+        total_kb = sum(m.get('Size') for m in mods
+                       if isinstance(m, dict) and isinstance(m.get('Size'), (int, float)))
+        if total_kb > 0:
+            gb = total_kb / (1024 * 1024)
+            total_mem = (f"{gb:.0f} GB" if abs(gb - round(gb)) < 0.05
+                         else f"{gb:.1f} GB")
+    if not total_mem:
+        total_mem = pick(hw, 'totalMemory', 'memory', 'installedMemory', 'ramSize')
+
+    return {
+        'manufacturer': as_text(pick(hw,
+            'AmtPlatformInfo.ManufacturerName', 'AmtBaseBoardInfo.ManufacturerName',
+            'manufacturer', 'Manufacturer', 'systemManufacturer')),
+        'model': as_text(pick(hw,
+            'AmtPlatformInfo.ComputerModel', 'AmtBaseBoardInfo.ProductName',
+            'model', 'Model', 'systemModel', 'productName')),
+        'serial_number': as_text(pick(hw,
+            'AmtPlatformInfo.SerialNumber', 'AmtBaseBoardInfo.SerialNumber',
+            'serialNumber', 'SerialNumber', 'serial')),
+        'bios_version': as_text(pick(hw,
+            'AmtBiosInfo.VersionNumber', 'AmtBiosInfo.Version',
+            'biosVersion', 'BiosVersion', 'biosVersionString')),
+        'cpu_desc': as_text(cpu),
+        'total_memory': as_text(total_mem),
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Cliente da API EMA
 # ---------------------------------------------------------------------------
@@ -502,32 +554,13 @@ class Db:
         return True
 
     def upsert_hardware(self, endpoint_id, hw, run_id):
-        vals = {
+        vals = extract_hardware_fields(hw)
+        vals.update({
             'endpoint_id': str(endpoint_id),
-            # HardwareInfoFromAmt e aninhado (AmtPlatformInfo/AmtBiosInfo/...).
-            # AmtPlatformInfo.* confirmados no probe; demais com fallback plano.
-            'manufacturer': as_text(pick(hw,
-                'AmtPlatformInfo.ManufacturerName', 'AmtPlatformInfo.Manufacturer',
-                'manufacturer', 'Manufacturer', 'systemManufacturer')),
-            'model': as_text(pick(hw,
-                'AmtPlatformInfo.ComputerModel', 'AmtPlatformInfo.Model',
-                'model', 'Model', 'systemModel', 'productName')),
-            'serial_number': as_text(pick(hw,
-                'AmtPlatformInfo.SerialNumber', 'AmtBaseboardInfo.SerialNumber',
-                'serialNumber', 'SerialNumber', 'serial')),
-            'bios_version': as_text(pick(hw,
-                'AmtBiosInfo.Version', 'AmtBiosInfo.BiosVersion',
-                'biosVersion', 'BiosVersion', 'biosVersionString')),
-            'cpu_desc': as_text(pick(hw,
-                'AmtProcessorInfo.Version', 'AmtProcessorInfo.ProcessorName',
-                'processor', 'cpu', 'processorName', 'cpuDescription')),
-            'total_memory': as_text(pick(hw,
-                'AmtMemoryInfo.TotalMemory', 'AmtPlatformInfo.TotalMemory',
-                'totalMemory', 'memory', 'installedMemory', 'ramSize')),
             'raw': json.dumps(hw, ensure_ascii=False),
             'ts': now(),
             'run_id': run_id,
-        }
+        })
         sql = """
         INSERT INTO hardware_inventory
           (endpoint_id, manufacturer, model, serial_number, bios_version,
