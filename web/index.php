@@ -35,12 +35,16 @@ require __DIR__ . '/header.php';
 </div>
 
 <div class="cards">
-  <?php foreach (['Modo de Controle'=>$byControl,'Estado de Energia'=>$byPower,'Conexao do Agente'=>$byConn] as $titulo=>$rows): ?>
+  <?php foreach ([
+      ['Modo de Controle',  $byControl, 'control_mode'],
+      ['Estado de Energia', $byPower,   'power_state'],
+      ['Conexao do Agente', $byConn,    'connection_status'],
+    ] as [$titulo, $rows, $col]): ?>
   <div class="panel">
     <h2><?= e($titulo) ?></h2>
     <table class="kv">
       <?php foreach ($rows as $r): ?>
-        <tr><th><?= e($r['k']) ?></th><td><?= (int)$r['c'] ?></td></tr>
+        <tr><th><?= e(friendly_value($col, $r['k'])) ?></th><td><?= (int)$r['c'] ?></td></tr>
       <?php endforeach; ?>
       <?php if (!$rows): ?><tr><td class="muted">Sem dados. Rode o coletor.</td></tr><?php endif; ?>
     </table>

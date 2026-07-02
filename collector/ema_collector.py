@@ -54,8 +54,11 @@ def now():
 def pick(d, *keys, default=None):
     """Retorna o primeiro valor presente e nao-vazio dentre varias chaves.
 
-    Aceita chaves aninhadas com ponto, ex: 'Group.Name'. Torna o coletor
-    resiliente a diferencas de nomenclatura entre versoes da API do EMA.
+    Aceita chaves aninhadas com ponto, ex: 'Group.Name'. A busca e
+    case-INSENSITIVE: o EMA devolve as chaves em PascalCase
+    (EndpointGroupId, AmtProfileId, Name, EndpointCount...), enquanto o
+    coletor as referencia em camelCase. Sem isso, ids de grupo/perfil
+    saem None e os registros sao silenciosamente descartados.
     """
     if not isinstance(d, dict):
         return default
@@ -63,11 +66,18 @@ def pick(d, *keys, default=None):
         cur = d
         ok = True
         for part in key.split('.'):
-            if isinstance(cur, dict) and part in cur:
-                cur = cur[part]
-            else:
+            if not isinstance(cur, dict):
                 ok = False
                 break
+            if part in cur:                      # match exato (mais rapido)
+                cur = cur[part]
+                continue
+            plow = part.lower()                  # fallback case-insensitive
+            match = next((k for k in cur if k.lower() == plow), None)
+            if match is None:
+                ok = False
+                break
+            cur = cur[match]
         if ok and cur not in (None, ""):
             return cur
     return default
@@ -80,6 +90,36 @@ def as_text(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)[:250]
     return str(value)[:250]
+
+
+def parse_dt(value):
+    """Converte timestamps ISO8601 do EMA (ex.: '2025-10-21T06:03:13Z') em
+    datetime, adequado a colunas DATETIME. Retorna None se nao reconhecer.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    s = str(value).strip().replace('T', ' ').replace('Z', '')
+    if not s:
+        return None
+    # s[:19] descarta fuso ('+00:00') e fracao de segundo, se houver.
+    try:
+        return datetime.datetime.strptime(s[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.strptime(s[:10], '%Y-%m-%d')
+    except ValueError:
+        return None
+
+
+def is_connected(ep):
+    """True se o endpoint aparenta estar conectado ao EMA (via agente ou
+    CIRA/AMT). Condicao necessaria p/ a consulta de hardware AMT em tempo
+    real ter chance de retornar dados (hardware nao fica no banco do EMA).
+    """
+    return bool(pick(ep, 'isConnected')) or bool(pick(ep, 'isCiraConnected'))
 
 
 # ---------------------------------------------------------------------------
@@ -171,17 +211,63 @@ class EmaClient:
             return None
         return resp.json()
 
+    def probe(self, path):
+        """Faz um GET sem levantar excecao e resume a resposta.
+
+        Usado pelo modo --debug-probe para descobrir quais caminhos de
+        recurso essa instancia do EMA realmente expoe (status HTTP, tamanho
+        da lista extraida e um trecho do corpo).
+        """
+        url = self._url(path)
+        try:
+            resp = self.session.get(url, verify=self.verify, timeout=self.timeout)
+        except Exception as exc:  # noqa: BLE001
+            return {'path': path, 'url': url, 'status': None,
+                    'count': None, 'snippet': f'ERRO: {exc}'}
+        status = resp.status_code
+        count = None
+        snippet = (resp.text or '')[:200].replace('\n', ' ')
+        if resp.ok and resp.content:
+            try:
+                count = len(self._extract_list(resp.json()))
+            except ValueError:
+                snippet = '(resposta nao-JSON) ' + snippet
+        return {'path': path, 'url': url, 'status': status,
+                'count': count, 'snippet': snippet}
+
     def get_list(self, path):
         """Percorre um recurso de lista lidando com paginacao e formatos.
 
         O EMA pode devolver uma lista pura ou um objeto envelope contendo a
-        lista (chaves como 'value', 'items', 'endpoints', 'data'). Tambem
-        tenta paginar via query params comuns; para no primeiro sinal de
-        fim de dados.
+        lista (chaves como 'value', 'items', 'endpoints', 'data').
+
+        Estrategia: esta instancia do EMA devolve a colecao INTEIRA numa
+        unica resposta e, para varios recursos (endpointGroups, amtProfiles),
+        RESPONDE VAZIO quando recebe parametros de paginacao desconhecidos.
+        Por isso tentamos primeiro SEM parametros; so caimos para paginacao
+        explicita se a resposta encostar exatamente no tamanho de pagina
+        (indicio de que pode haver continuacao).
         """
-        collected = []
-        skip = 0
-        page = 1
+        # 1) Tentativa limpa, sem parametros de paginacao.
+        try:
+            first = self._extract_list(self.get(path))
+        except requests.HTTPError as exc:
+            logging.debug("GET sem params falhou em %s (%s); tentando paginar.",
+                          path, exc)
+            first = None
+
+        # Resposta que nao encosta no page_size e completa (o servidor
+        # devolveu tudo de uma vez). Cobre grupos (57), perfis (3) e o parque
+        # inteiro de endpoints (>page_size numa unica resposta).
+        if first is not None and len(first) != self.page_size:
+            return first
+
+        # 2) Ou a resposta sem params falhou, ou trouxe exatamente page_size
+        #    itens (pode haver mais). Pagina explicitamente, deduplicando.
+        collected = list(first) if first else []
+        seen = {self._item_signature(it) for it in collected}
+        skip = self.page_size if collected else 0
+        page = 2 if collected else 1
         while True:
             # Tenta variantes de paginacao mais comuns em APIs .NET/EMA.
             params = {'$top': self.page_size, '$skip': skip,
@@ -191,18 +277,40 @@ class EmaClient:
             try:
                 data = self.get(path, params=params)
             except requests.HTTPError as exc:
-                # Alguns endpoints nao aceitam query params -> tenta sem.
-                if page == 1 and skip == 0:
-                    logging.debug("Paginacao rejeitada em %s (%s); tentando sem params.",
-                                  path, exc)
-                    data = self.get(path)
-                    return self._extract_list(data)
-                raise
+                # Paginacao nao suportada -> ficamos com o que ja temos.
+                logging.debug("Paginacao rejeitada em %s (%s); usando resposta base.",
+                              path, exc)
+                break
 
             items = self._extract_list(data)
             if not items:
                 break
-            collected.extend(items)
+
+            # Deduplica por identidade do item. Muitas versoes do EMA IGNORAM
+            # os parametros de paginacao e devolvem SEMPRE a lista completa; sem
+            # esta checagem, cada "pagina" reinsere o conjunto inteiro e o loop
+            # so para no limite de seguranca, acumulando ate 10.000x os dados em
+            # memoria -> processo morto pelo OOM killer.
+            new_items = []
+            for it in items:
+                sig = self._item_signature(it)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                new_items.append(it)
+
+            # Nenhum item novo nesta pagina => o servidor esta reenviando o
+            # mesmo conjunto (paginacao nao honrada). Encerramos.
+            if not new_items:
+                if page > 1:
+                    logging.debug("Paginacao nao honrada em %s; encerrando na "
+                                  "pagina %s (sem itens novos).", path, page)
+                break
+
+            collected.extend(new_items)
+
+            # Pagina "curta" (menos itens que o tamanho pedido) indica fim
+            # natural quando a paginacao e respeitada.
             if len(items) < self.page_size:
                 break
             skip += self.page_size
@@ -211,6 +319,24 @@ class EmaClient:
                 logging.warning("Paginacao excedeu limite em %s", path)
                 break
         return collected
+
+    # Chaves de identidade preferenciais p/ deduplicar itens entre paginas.
+    _ID_KEYS = ('endpointId', 'EndpointId', 'id', 'Id', 'guid',
+                'endpointGroupId', 'groupId', 'amtProfileId', 'profileId')
+
+    @classmethod
+    def _item_signature(cls, item):
+        """Assinatura estavel de um item p/ detectar duplicatas entre paginas."""
+        if isinstance(item, dict):
+            for key in cls._ID_KEYS:
+                val = item.get(key)
+                if val not in (None, ""):
+                    return f"{key}={val}"
+            try:
+                return json.dumps(item, sort_keys=True, ensure_ascii=False)
+            except TypeError:
+                return repr(item)
+        return repr(item)
 
     @staticmethod
     def _extract_list(data):
@@ -274,7 +400,8 @@ class Db:
             'os_desc': as_text(pick(ep, 'osDescription', 'operatingSystem', 'os', 'clientOS')),
             'ip_address': as_text(pick(ep, 'ipAddress', 'IPAddress', 'ip', 'wiredIPAddress')),
             'mac_address': as_text(pick(ep, 'macAddress', 'MACAddress', 'mac', 'wiredMACAddress')),
-            'amt_version': as_text(pick(ep, 'amtVersion', 'AMTVersion', 'meshAgentVersion')),
+            'amt_version': as_text(pick(ep, 'amtVersion', 'AMTVersion', 'meshAgentVersion',
+                                        'MEVersion')),
             'power_state': as_text(pick(ep, 'powerState', 'PowerState', 'amtPowerState')),
             'connection_status': as_text(pick(ep, 'connectionStatus', 'agentStatus',
                                               'meshConnStatus', 'online', 'isConnected')),
@@ -284,7 +411,8 @@ class Db:
                                                'setupState')),
             'group_id': as_text(pick(ep, 'endpointGroupId', 'groupId', 'EndpointGroupId', 'Group.Id')),
             'group_name': as_text(pick(ep, 'endpointGroupName', 'groupName', 'Group.Name')),
-            'last_seen': None,
+            'last_seen': parse_dt(pick(ep, 'lastSeen', 'lastContact', 'lastConnected',
+                                       'LastUpdate', 'lastUpdate', 'lastCommunication')),
             'raw': json.dumps(ep, ensure_ascii=False),
             'ts': now(),
             'run_id': run_id,
@@ -456,31 +584,63 @@ def run(config_path):
         logging.info("Coletando endpoints/dispositivos...")
         endpoints = client.get_list('endpoints')
         endpoint_ids = []
+        connected_ids = []
         for ep in endpoints:
             if db.upsert_endpoint(ep, run_id):
                 counts['endpoints'] += 1
                 eid = pick(ep, 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
                 if eid:
-                    endpoint_ids.append(str(eid))
+                    eid = str(eid)
+                    endpoint_ids.append(eid)
+                    if is_connected(ep):
+                        connected_ids.append(eid)
             if counts['endpoints'] % 200 == 0:
                 db.commit()
         db.commit()
-        logging.info("Endpoints coletados: %s", counts['endpoints'])
+        logging.info("Endpoints coletados: %s (conectados: %s)",
+                     counts['endpoints'], len(connected_ids))
 
         # --- Inventario de hardware por dispositivo ----------------------
+        # Hardware NAO fica no banco do EMA: e lido do Intel AMT em tempo real
+        # (GET endpoints/{id}/HardwareInfoFromAmt) e so responde p/ hosts
+        # CONECTADOS com AMT provisionada. Por isso consultamos apenas os
+        # conectados, e nao os 11 mil (a maioria offline).
         if cfg['ema'].getboolean('collect_hardware', fallback=True):
-            logging.info("Coletando inventario de hardware (%s hosts)...",
-                         len(endpoint_ids))
-            for i, eid in enumerate(endpoint_ids, 1):
-                hw = fetch_hardware(client, eid)
-                if hw:
-                    db.upsert_hardware(eid, hw, run_id)
-                    counts['hardware'] += 1
-                if i % 100 == 0:
+            if not connected_ids:
+                logging.info("Nenhum endpoint conectado no momento; hardware AMT "
+                             "(tempo real) nao e coletavel agora.")
+            else:
+                # Canary: 1 chamada p/ detectar cedo falta de permissao (403) ou
+                # caminho ausente (404) e evitar milhares de chamadas inuteis.
+                canary = client.probe(
+                    f"endpoints/{connected_ids[0]}/HardwareInfoFromAmt")
+                st = canary['status']
+                if st in (401, 403):
+                    logging.warning(
+                        "Sem permissao p/ ler hardware AMT (HTTP %s em "
+                        "HardwareInfoFromAmt). A conta da API (client_credentials) le "
+                        "o inventario, mas nao possui direitos de manageability/AMT "
+                        "sobre os grupos de endpoints no EMA. Conceda esses direitos a "
+                        "conta no EMA p/ habilitar a coleta de hardware. Pulando etapa.",
+                        st)
+                elif st == 404:
+                    logging.warning(
+                        "HardwareInfoFromAmt indisponivel neste servidor (HTTP 404). "
+                        "Pulando etapa de hardware.")
+                else:
+                    logging.info("Coletando hardware AMT em tempo real de %s host(s) "
+                                 "conectado(s)...", len(connected_ids))
+                    for i, eid in enumerate(connected_ids, 1):
+                        hw = fetch_hardware(client, eid)
+                        if hw:
+                            db.upsert_hardware(eid, hw, run_id)
+                            counts['hardware'] += 1
+                        if i % 50 == 0:
+                            db.commit()
+                            logging.info("  ...hardware %s/%s", i, len(connected_ids))
                     db.commit()
-                    logging.info("  ...hardware %s/%s", i, len(endpoint_ids))
-            db.commit()
-            logging.info("Hardware coletado: %s", counts['hardware'])
+                    logging.info("Hardware coletado: %s de %s conectados",
+                                 counts['hardware'], len(connected_ids))
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)
@@ -494,13 +654,114 @@ def run(config_path):
     db.close()
 
 
-def fetch_hardware(client, endpoint_id):
-    """Tenta os caminhos conhecidos de inventario de hardware do EMA."""
+def hardware_path_candidates(eid):
+    """Lista de caminhos candidatos p/ inventario de hardware de um endpoint.
+
+    Cobre dois padroes de URL observados na API do EMA: o sub-recurso
+    ('endpoints/{id}/PlatformCapabilities') e o recurso-primeiro
+    ('amtSetups/endpoints/{id}').
+    """
+    subresources = [
+        'HardwareInfoFromAmt',  # caminho oficial (script Intel)
+        'HardwareInfo', 'hardwareInfo', 'HardwareInformation', 'hardwareInformation',
+        'hardware', 'Hardware', 'hardwareAssets', 'HardwareAssets',
+        'amtHardwareInfo', 'AmtHardwareInfo', 'amtHardwareAssets',
+        'GeneralInfo', 'generalInfo', 'amtGeneralInfo', 'AmtGeneralInfo',
+        'amtGeneralSettings', 'generalSettings', 'systemInfo', 'SystemInfo',
+        'computerSystem', 'platformInfo', 'PlatformInfo', 'assets', 'inventory',
+    ]
+    resource_first = [
+        'amtHardwareInfo', 'hardwareInfo', 'amtHardware', 'hardware',
+        'endpointHardware', 'amtHardwareAssets', 'amtGeneralInfo',
+    ]
+    paths = [f"endpoints/{eid}/{sr}" for sr in subresources]
+    paths += [f"{rf}/endpoints/{eid}" for rf in resource_first]
+    # 'PlatformCapabilities' e conhecido (200) -> referencia de sanidade.
+    paths.append(f"endpoints/{eid}/PlatformCapabilities")
+    return paths
+
+
+def debug_probe(config_path, probe_endpoint=None):
+    """Autentica e testa varios caminhos candidatos p/ grupos, perfis e
+    hardware. Ajuda a descobrir o caminho certo de cada recurso: caminho
+    errado (404/erro) vs. lista realmente vazia (200 + count=0).
+
+    Se probe_endpoint for informado, os caminhos de hardware sao testados
+    contra ESSE endpoint (util p/ usar uma maquina que voce sabe estar
+    online e com hardware visivel no web UI). Caso contrario, usa o
+    primeiro endpoint retornado pela API.
+    """
+    cfg = configparser.ConfigParser()
+    if not cfg.read(config_path):
+        sys.exit(f"Nao consegui ler o arquivo de config: {config_path}")
+    setup_logging(cfg['log'] if cfg.has_section('log') else {})
+
+    client = EmaClient(cfg['ema'])
+    client.authenticate()
+
     candidates = [
+        # grupos de endpoints
+        'endpointGroups', 'EndpointGroups', 'endpointgroups', 'groups',
+        'api/v2/endpointGroups', 'api/v1/endpointGroups',
+        # perfis AMT
+        'amtProfiles', 'AMTProfiles', 'amtprofiles', 'profiles',
+        'api/v2/amtProfiles', 'api/v1/amtProfiles',
+        # referencia: endpoints (sabemos que funciona)
+        'endpoints',
+    ]
+    logging.info("Sondando %s caminhos candidatos (grupos/perfis)...", len(candidates))
+    logging.info("%-32s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    for path in candidates:
+        r = client.probe(path)
+        logging.info("%-32s %-6s %-8s %s",
+                     r['path'], r['status'],
+                     '-' if r['count'] is None else r['count'],
+                     r['snippet'][:120])
+
+    # --- Hardware ---------------------------------------------------------
+    eid = probe_endpoint
+    if not eid:
+        logging.info("Buscando 1 endpoint de amostra p/ sondar hardware...")
+        sample = client.get_list('endpoints')[:1]
+        if not sample:
+            logging.warning("Nenhum endpoint disponivel p/ sondar hardware.")
+            return
+        eid = pick(sample[0], 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
+    logging.info("Sondando caminhos de hardware p/ endpoint_id=%s", eid)
+    logging.info("(dica: passe --probe-endpoint <ID de uma maquina ONLINE> "
+                 "p/ testar contra um host com hardware visivel no web UI)")
+    hw_paths = hardware_path_candidates(eid)
+    logging.info("%-42s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    hits = []
+    for path in hw_paths:
+        r = client.probe(path)
+        status = r['status']
+        # Destaca respostas promissoras (2xx que nao sejam o proprio endpoint).
+        if status and 200 <= status < 300:
+            hits.append(path)
+        logging.info("%-42s %-6s %-8s %s",
+                     path, status,
+                     '-' if r['count'] is None else r['count'],
+                     r['snippet'][:120])
+    if hits:
+        logging.info("Caminhos de hardware que responderam 2xx: %s", hits)
+    else:
+        logging.info("Nenhum caminho de hardware respondeu 2xx para esse host.")
+
+
+def fetch_hardware(client, endpoint_id):
+    """Le o inventario de hardware AMT (em tempo real) de um endpoint.
+
+    Caminho oficial (script Intel Get-IntelEMAEndpointAMTHardwareInfo):
+    GET endpoints/{id}/HardwareInfoFromAmt. O dado nao fica no banco do
+    EMA -- e consultado no Intel AMT no momento da chamada -- entao so
+    retorna se o dispositivo estiver conectado e com AMT provisionada.
+    Os demais sao fallbacks p/ outras versoes/nomenclaturas.
+    """
+    candidates = [
+        f"endpoints/{endpoint_id}/HardwareInfoFromAmt",
         f"endpoints/{endpoint_id}/HardwareInfo",
         f"endpoints/{endpoint_id}/hardwareInfo",
-        f"endpoints/{endpoint_id}/hardware",
-        f"endpoints/{endpoint_id}/amtHardwareInfo",
     ]
     for path in candidates:
         try:
@@ -538,9 +799,19 @@ def main():
     parser.add_argument('--config', default=os.path.join(
         os.path.dirname(__file__), '..', 'config.ini'),
         help="Caminho do config.ini (padrao: ../config.ini)")
+    parser.add_argument('--debug-probe', action='store_true',
+        help="Nao coleta; apenas testa caminhos de recurso (grupos/perfis/"
+             "hardware) e mostra status HTTP e contagem de itens de cada um.")
+    parser.add_argument('--probe-endpoint', metavar='ENDPOINT_ID', default=None,
+        help="Com --debug-probe: testa os caminhos de hardware contra este "
+             "endpoint especifico (use o ID de uma maquina ONLINE, com "
+             "hardware visivel no web UI).")
     args = parser.parse_args()
     start = time.time()
-    run(os.path.abspath(args.config))
+    if args.debug_probe:
+        debug_probe(os.path.abspath(args.config), probe_endpoint=args.probe_endpoint)
+    else:
+        run(os.path.abspath(args.config))
     logging.info("Tempo total: %.1fs", time.time() - start)
 
 
