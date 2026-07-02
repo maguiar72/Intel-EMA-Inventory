@@ -180,6 +180,7 @@ class EmaClient:
         fim de dados.
         """
         collected = []
+        seen = set()
         skip = 0
         page = 1
         while True:
@@ -202,7 +203,32 @@ class EmaClient:
             items = self._extract_list(data)
             if not items:
                 break
-            collected.extend(items)
+
+            # Deduplica por identidade do item. Muitas versoes do EMA IGNORAM
+            # os parametros de paginacao e devolvem SEMPRE a lista completa; sem
+            # esta checagem, cada "pagina" reinsere o conjunto inteiro e o loop
+            # so para no limite de seguranca, acumulando ate 10.000x os dados em
+            # memoria -> processo morto pelo OOM killer.
+            new_items = []
+            for it in items:
+                sig = self._item_signature(it)
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                new_items.append(it)
+
+            # Nenhum item novo nesta pagina => o servidor esta reenviando o
+            # mesmo conjunto (paginacao nao honrada). Encerramos.
+            if not new_items:
+                if page > 1:
+                    logging.debug("Paginacao nao honrada em %s; encerrando na "
+                                  "pagina %s (sem itens novos).", path, page)
+                break
+
+            collected.extend(new_items)
+
+            # Pagina "curta" (menos itens que o tamanho pedido) indica fim
+            # natural quando a paginacao e respeitada.
             if len(items) < self.page_size:
                 break
             skip += self.page_size
@@ -211,6 +237,24 @@ class EmaClient:
                 logging.warning("Paginacao excedeu limite em %s", path)
                 break
         return collected
+
+    # Chaves de identidade preferenciais p/ deduplicar itens entre paginas.
+    _ID_KEYS = ('endpointId', 'EndpointId', 'id', 'Id', 'guid',
+                'endpointGroupId', 'groupId', 'amtProfileId', 'profileId')
+
+    @classmethod
+    def _item_signature(cls, item):
+        """Assinatura estavel de um item p/ detectar duplicatas entre paginas."""
+        if isinstance(item, dict):
+            for key in cls._ID_KEYS:
+                val = item.get(key)
+                if val not in (None, ""):
+                    return f"{key}={val}"
+            try:
+                return json.dumps(item, sort_keys=True, ensure_ascii=False)
+            except TypeError:
+                return repr(item)
+        return repr(item)
 
     @staticmethod
     def _extract_list(data):
