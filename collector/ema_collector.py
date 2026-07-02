@@ -171,6 +171,30 @@ class EmaClient:
             return None
         return resp.json()
 
+    def probe(self, path):
+        """Faz um GET sem levantar excecao e resume a resposta.
+
+        Usado pelo modo --debug-probe para descobrir quais caminhos de
+        recurso essa instancia do EMA realmente expoe (status HTTP, tamanho
+        da lista extraida e um trecho do corpo).
+        """
+        url = self._url(path)
+        try:
+            resp = self.session.get(url, verify=self.verify, timeout=self.timeout)
+        except Exception as exc:  # noqa: BLE001
+            return {'path': path, 'url': url, 'status': None,
+                    'count': None, 'snippet': f'ERRO: {exc}'}
+        status = resp.status_code
+        count = None
+        snippet = (resp.text or '')[:200].replace('\n', ' ')
+        if resp.ok and resp.content:
+            try:
+                count = len(self._extract_list(resp.json()))
+            except ValueError:
+                snippet = '(resposta nao-JSON) ' + snippet
+        return {'path': path, 'url': url, 'status': status,
+                'count': count, 'snippet': snippet}
+
     def get_list(self, path):
         """Percorre um recurso de lista lidando com paginacao e formatos.
 
@@ -538,6 +562,40 @@ def run(config_path):
     db.close()
 
 
+def debug_probe(config_path):
+    """Autentica e testa varios caminhos candidatos p/ grupos e perfis.
+
+    Ajuda a descobrir por que 'endpointGroups'/'amtProfiles' retornam vazio:
+    caminho errado (404/erro) vs. lista realmente vazia (200 + count=0).
+    """
+    cfg = configparser.ConfigParser()
+    if not cfg.read(config_path):
+        sys.exit(f"Nao consegui ler o arquivo de config: {config_path}")
+    setup_logging(cfg['log'] if cfg.has_section('log') else {})
+
+    client = EmaClient(cfg['ema'])
+    client.authenticate()
+
+    candidates = [
+        # grupos de endpoints
+        'endpointGroups', 'EndpointGroups', 'endpointgroups', 'groups',
+        'api/v2/endpointGroups', 'api/v1/endpointGroups',
+        # perfis AMT
+        'amtProfiles', 'AMTProfiles', 'amtprofiles', 'profiles',
+        'api/v2/amtProfiles', 'api/v1/amtProfiles',
+        # referencia: endpoints (sabemos que funciona)
+        'endpoints',
+    ]
+    logging.info("Sondando %s caminhos candidatos...", len(candidates))
+    logging.info("%-28s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    for path in candidates:
+        r = client.probe(path)
+        logging.info("%-28s %-6s %-8s %s",
+                     r['path'], r['status'],
+                     '-' if r['count'] is None else r['count'],
+                     r['snippet'][:120])
+
+
 def fetch_hardware(client, endpoint_id):
     """Tenta os caminhos conhecidos de inventario de hardware do EMA."""
     candidates = [
@@ -582,9 +640,15 @@ def main():
     parser.add_argument('--config', default=os.path.join(
         os.path.dirname(__file__), '..', 'config.ini'),
         help="Caminho do config.ini (padrao: ../config.ini)")
+    parser.add_argument('--debug-probe', action='store_true',
+        help="Nao coleta; apenas testa caminhos de recurso (grupos/perfis) "
+             "e mostra status HTTP e contagem de itens de cada um.")
     args = parser.parse_args()
     start = time.time()
-    run(os.path.abspath(args.config))
+    if args.debug_probe:
+        debug_probe(os.path.abspath(args.config))
+    else:
+        run(os.path.abspath(args.config))
     logging.info("Tempo total: %.1fs", time.time() - start)
 
 
