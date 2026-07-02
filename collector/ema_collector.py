@@ -88,8 +88,16 @@ def as_text(value):
 class EmaClient:
     def __init__(self, cfg):
         self.base = cfg['base_url'].rstrip('/')
-        self.username = cfg['username']
-        self.password = cfg['password']
+        # Fluxo de autenticacao: 'client_credentials' (padrao no EMA recente,
+        # equivale ao -useCCAuth) ou 'password' (Resource Owner).
+        self.auth_flow = cfg.get('auth_flow', fallback='client_credentials').strip().lower()
+        # Client Credentials (system-to-system)
+        self.client_id = cfg.get('client_id', fallback='').strip()
+        self.client_secret = cfg.get('client_secret', fallback='').strip()
+        self.scope = cfg.get('scope', fallback='').strip()
+        # Resource Owner Password (fallback)
+        self.username = cfg.get('username', fallback='').strip()
+        self.password = cfg.get('password', fallback='').strip()
         self.verify = cfg.getboolean('verify_ssl', fallback=True)
         self.api_version = cfg.get('api_version', 'latest')
         self.page_size = cfg.getint('page_size', fallback=200)
@@ -102,19 +110,44 @@ class EmaClient:
     # -- autenticacao ------------------------------------------------------
     def authenticate(self):
         url = f"{self.base}/api/token"
-        logging.info("Autenticando em %s", url)
-        resp = self.session.post(
-            url,
-            data={
+        logging.info("Autenticando em %s (fluxo=%s)", url, self.auth_flow)
+
+        if self.auth_flow == 'client_credentials':
+            # client_id = GUID gerado no EMA; client_secret = segredo do par.
+            # (Aceita username/password como fallback caso client_id/secret
+            #  nao tenham sido preenchidos separadamente.)
+            cid = self.client_id or self.username
+            csecret = self.client_secret or self.password
+            if not cid or not csecret:
+                raise RuntimeError("client_id/client_secret ausentes para o fluxo "
+                                   "client_credentials. Preencha no config.ini.")
+            body = {
+                'grant_type': 'client_credentials',
+                'client_id': cid,
+                'client_secret': csecret,
+            }
+            if self.scope:
+                body['scope'] = self.scope
+        else:
+            body = {
                 'grant_type': 'password',
                 'username': self.username,
                 'password': self.password,
-            },
+            }
+
+        resp = self.session.post(
+            url, data=body,
             headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            verify=self.verify,
-            timeout=self.timeout,
+            verify=self.verify, timeout=self.timeout,
         )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Loga o corpo da resposta p/ diagnostico (invalid_client,
+            # unsupported_grant_type, invalid_scope, etc.).
+            detail = (resp.text or '').strip()[:800]
+            logging.error("Falha na autenticacao (HTTP %s). Resposta do EMA: %s",
+                          resp.status_code, detail or '(vazio)')
+            resp.raise_for_status()
+
         data = resp.json()
         self.token = pick(data, 'access_token', 'accessToken', 'token')
         if not self.token:
