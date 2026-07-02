@@ -92,6 +92,28 @@ def as_text(value):
     return str(value)[:250]
 
 
+def parse_dt(value):
+    """Converte timestamps ISO8601 do EMA (ex.: '2025-10-21T06:03:13Z') em
+    datetime, adequado a colunas DATETIME. Retorna None se nao reconhecer.
+    """
+    if not value:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    s = str(value).strip().replace('T', ' ').replace('Z', '')
+    if not s:
+        return None
+    # s[:19] descarta fuso ('+00:00') e fracao de segundo, se houver.
+    try:
+        return datetime.datetime.strptime(s[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        pass
+    try:
+        return datetime.datetime.strptime(s[:10], '%Y-%m-%d')
+    except ValueError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 #  Cliente da API EMA
 # ---------------------------------------------------------------------------
@@ -370,7 +392,8 @@ class Db:
             'os_desc': as_text(pick(ep, 'osDescription', 'operatingSystem', 'os', 'clientOS')),
             'ip_address': as_text(pick(ep, 'ipAddress', 'IPAddress', 'ip', 'wiredIPAddress')),
             'mac_address': as_text(pick(ep, 'macAddress', 'MACAddress', 'mac', 'wiredMACAddress')),
-            'amt_version': as_text(pick(ep, 'amtVersion', 'AMTVersion', 'meshAgentVersion')),
+            'amt_version': as_text(pick(ep, 'amtVersion', 'AMTVersion', 'meshAgentVersion',
+                                        'MEVersion')),
             'power_state': as_text(pick(ep, 'powerState', 'PowerState', 'amtPowerState')),
             'connection_status': as_text(pick(ep, 'connectionStatus', 'agentStatus',
                                               'meshConnStatus', 'online', 'isConnected')),
@@ -380,7 +403,8 @@ class Db:
                                                'setupState')),
             'group_id': as_text(pick(ep, 'endpointGroupId', 'groupId', 'EndpointGroupId', 'Group.Id')),
             'group_name': as_text(pick(ep, 'endpointGroupName', 'groupName', 'Group.Name')),
-            'last_seen': None,
+            'last_seen': parse_dt(pick(ep, 'lastSeen', 'lastContact', 'lastConnected',
+                                       'LastUpdate', 'lastUpdate', 'lastCommunication')),
             'raw': json.dumps(ep, ensure_ascii=False),
             'ts': now(),
             'run_id': run_id,
