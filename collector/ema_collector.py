@@ -199,14 +199,35 @@ class EmaClient:
         """Percorre um recurso de lista lidando com paginacao e formatos.
 
         O EMA pode devolver uma lista pura ou um objeto envelope contendo a
-        lista (chaves como 'value', 'items', 'endpoints', 'data'). Tambem
-        tenta paginar via query params comuns; para no primeiro sinal de
-        fim de dados.
+        lista (chaves como 'value', 'items', 'endpoints', 'data').
+
+        Estrategia: esta instancia do EMA devolve a colecao INTEIRA numa
+        unica resposta e, para varios recursos (endpointGroups, amtProfiles),
+        RESPONDE VAZIO quando recebe parametros de paginacao desconhecidos.
+        Por isso tentamos primeiro SEM parametros; so caimos para paginacao
+        explicita se a resposta encostar exatamente no tamanho de pagina
+        (indicio de que pode haver continuacao).
         """
-        collected = []
-        seen = set()
-        skip = 0
-        page = 1
+        # 1) Tentativa limpa, sem parametros de paginacao.
+        try:
+            first = self._extract_list(self.get(path))
+        except requests.HTTPError as exc:
+            logging.debug("GET sem params falhou em %s (%s); tentando paginar.",
+                          path, exc)
+            first = None
+
+        # Resposta que nao encosta no page_size e completa (o servidor
+        # devolveu tudo de uma vez). Cobre grupos (57), perfis (3) e o parque
+        # inteiro de endpoints (>page_size numa unica resposta).
+        if first is not None and len(first) != self.page_size:
+            return first
+
+        # 2) Ou a resposta sem params falhou, ou trouxe exatamente page_size
+        #    itens (pode haver mais). Pagina explicitamente, deduplicando.
+        collected = list(first) if first else []
+        seen = {self._item_signature(it) for it in collected}
+        skip = self.page_size if collected else 0
+        page = 2 if collected else 1
         while True:
             # Tenta variantes de paginacao mais comuns em APIs .NET/EMA.
             params = {'$top': self.page_size, '$skip': skip,
@@ -216,13 +237,10 @@ class EmaClient:
             try:
                 data = self.get(path, params=params)
             except requests.HTTPError as exc:
-                # Alguns endpoints nao aceitam query params -> tenta sem.
-                if page == 1 and skip == 0:
-                    logging.debug("Paginacao rejeitada em %s (%s); tentando sem params.",
-                                  path, exc)
-                    data = self.get(path)
-                    return self._extract_list(data)
-                raise
+                # Paginacao nao suportada -> ficamos com o que ja temos.
+                logging.debug("Paginacao rejeitada em %s (%s); usando resposta base.",
+                              path, exc)
+                break
 
             items = self._extract_list(data)
             if not items:
@@ -536,19 +554,34 @@ def run(config_path):
         logging.info("Endpoints coletados: %s", counts['endpoints'])
 
         # --- Inventario de hardware por dispositivo ----------------------
-        if cfg['ema'].getboolean('collect_hardware', fallback=True):
-            logging.info("Coletando inventario de hardware (%s hosts)...",
-                         len(endpoint_ids))
-            for i, eid in enumerate(endpoint_ids, 1):
-                hw = fetch_hardware(client, eid)
-                if hw:
-                    db.upsert_hardware(eid, hw, run_id)
-                    counts['hardware'] += 1
-                if i % 100 == 0:
-                    db.commit()
-                    logging.info("  ...hardware %s/%s", i, len(endpoint_ids))
-            db.commit()
-            logging.info("Hardware coletado: %s", counts['hardware'])
+        if cfg['ema'].getboolean('collect_hardware', fallback=True) and endpoint_ids:
+            # Sonda o 1o host: se nenhum caminho de hardware responder (todos
+            # 404), o recurso nao existe nesta versao do EMA. Abortamos a etapa
+            # em vez de disparar ~4 x N requisicoes 404 inuteis (antes: ~45k
+            # chamadas / ~150s desperdicados retornando hardware=0).
+            first_hw = fetch_hardware(client, endpoint_ids[0])
+            if first_hw is None:
+                logging.warning(
+                    "Nenhum caminho de hardware respondeu para o host de amostra "
+                    "(%s); esta versao do EMA nao expoe inventario por sub-recurso. "
+                    "Pulando etapa de hardware. Rode com --debug-probe para revisar "
+                    "os caminhos, ou desative collect_hardware no config.ini.",
+                    endpoint_ids[0])
+            else:
+                logging.info("Coletando inventario de hardware (%s hosts)...",
+                             len(endpoint_ids))
+                db.upsert_hardware(endpoint_ids[0], first_hw, run_id)
+                counts['hardware'] += 1
+                for i, eid in enumerate(endpoint_ids[1:], 2):
+                    hw = fetch_hardware(client, eid)
+                    if hw:
+                        db.upsert_hardware(eid, hw, run_id)
+                        counts['hardware'] += 1
+                    if i % 100 == 0:
+                        db.commit()
+                        logging.info("  ...hardware %s/%s", i, len(endpoint_ids))
+                db.commit()
+                logging.info("Hardware coletado: %s", counts['hardware'])
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)
