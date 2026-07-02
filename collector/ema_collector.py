@@ -629,11 +629,41 @@ def run(config_path):
     db.close()
 
 
-def debug_probe(config_path):
-    """Autentica e testa varios caminhos candidatos p/ grupos e perfis.
+def hardware_path_candidates(eid):
+    """Lista de caminhos candidatos p/ inventario de hardware de um endpoint.
 
-    Ajuda a descobrir por que 'endpointGroups'/'amtProfiles' retornam vazio:
-    caminho errado (404/erro) vs. lista realmente vazia (200 + count=0).
+    Cobre dois padroes de URL observados na API do EMA: o sub-recurso
+    ('endpoints/{id}/PlatformCapabilities') e o recurso-primeiro
+    ('amtSetups/endpoints/{id}').
+    """
+    subresources = [
+        'HardwareInfo', 'hardwareInfo', 'HardwareInformation', 'hardwareInformation',
+        'hardware', 'Hardware', 'hardwareAssets', 'HardwareAssets',
+        'amtHardwareInfo', 'AmtHardwareInfo', 'amtHardwareAssets',
+        'GeneralInfo', 'generalInfo', 'amtGeneralInfo', 'AmtGeneralInfo',
+        'amtGeneralSettings', 'generalSettings', 'systemInfo', 'SystemInfo',
+        'computerSystem', 'platformInfo', 'PlatformInfo', 'assets', 'inventory',
+    ]
+    resource_first = [
+        'amtHardwareInfo', 'hardwareInfo', 'amtHardware', 'hardware',
+        'endpointHardware', 'amtHardwareAssets', 'amtGeneralInfo',
+    ]
+    paths = [f"endpoints/{eid}/{sr}" for sr in subresources]
+    paths += [f"{rf}/endpoints/{eid}" for rf in resource_first]
+    # 'PlatformCapabilities' e conhecido (200) -> referencia de sanidade.
+    paths.append(f"endpoints/{eid}/PlatformCapabilities")
+    return paths
+
+
+def debug_probe(config_path, probe_endpoint=None):
+    """Autentica e testa varios caminhos candidatos p/ grupos, perfis e
+    hardware. Ajuda a descobrir o caminho certo de cada recurso: caminho
+    errado (404/erro) vs. lista realmente vazia (200 + count=0).
+
+    Se probe_endpoint for informado, os caminhos de hardware sao testados
+    contra ESSE endpoint (util p/ usar uma maquina que voce sabe estar
+    online e com hardware visivel no web UI). Caso contrario, usa o
+    primeiro endpoint retornado pela API.
     """
     cfg = configparser.ConfigParser()
     if not cfg.read(config_path):
@@ -662,31 +692,35 @@ def debug_probe(config_path):
                      '-' if r['count'] is None else r['count'],
                      r['snippet'][:120])
 
-    # Sonda os caminhos de hardware usando um endpoint real como amostra.
-    logging.info("Buscando 1 endpoint de amostra p/ sondar hardware...")
-    sample = client.get_list('endpoints')[:1]
-    if not sample:
-        logging.warning("Nenhum endpoint disponivel p/ sondar hardware.")
-        return
-    eid = pick(sample[0], 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
+    # --- Hardware ---------------------------------------------------------
+    eid = probe_endpoint
+    if not eid:
+        logging.info("Buscando 1 endpoint de amostra p/ sondar hardware...")
+        sample = client.get_list('endpoints')[:1]
+        if not sample:
+            logging.warning("Nenhum endpoint disponivel p/ sondar hardware.")
+            return
+        eid = pick(sample[0], 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
     logging.info("Sondando caminhos de hardware p/ endpoint_id=%s", eid)
-    hw_paths = [
-        f"endpoints/{eid}/HardwareInfo",
-        f"endpoints/{eid}/hardwareInfo",
-        f"endpoints/{eid}/hardware",
-        f"endpoints/{eid}/amtHardwareInfo",
-        f"endpoints/{eid}/hardwareInformation",
-        f"endpoints/{eid}/inventory",
-        f"endpoints/{eid}/amtGeneralSettings",
-        f"endpoints/{eid}",
-    ]
-    logging.info("%-40s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    logging.info("(dica: passe --probe-endpoint <ID de uma maquina ONLINE> "
+                 "p/ testar contra um host com hardware visivel no web UI)")
+    hw_paths = hardware_path_candidates(eid)
+    logging.info("%-42s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    hits = []
     for path in hw_paths:
         r = client.probe(path)
-        logging.info("%-40s %-6s %-8s %s",
-                     r['path'].split('/', 2)[-1], r['status'],
+        status = r['status']
+        # Destaca respostas promissoras (2xx que nao sejam o proprio endpoint).
+        if status and 200 <= status < 300:
+            hits.append(path)
+        logging.info("%-42s %-6s %-8s %s",
+                     path, status,
                      '-' if r['count'] is None else r['count'],
                      r['snippet'][:120])
+    if hits:
+        logging.info("Caminhos de hardware que responderam 2xx: %s", hits)
+    else:
+        logging.info("Nenhum caminho de hardware respondeu 2xx para esse host.")
 
 
 def fetch_hardware(client, endpoint_id):
@@ -734,12 +768,16 @@ def main():
         os.path.dirname(__file__), '..', 'config.ini'),
         help="Caminho do config.ini (padrao: ../config.ini)")
     parser.add_argument('--debug-probe', action='store_true',
-        help="Nao coleta; apenas testa caminhos de recurso (grupos/perfis) "
-             "e mostra status HTTP e contagem de itens de cada um.")
+        help="Nao coleta; apenas testa caminhos de recurso (grupos/perfis/"
+             "hardware) e mostra status HTTP e contagem de itens de cada um.")
+    parser.add_argument('--probe-endpoint', metavar='ENDPOINT_ID', default=None,
+        help="Com --debug-probe: testa os caminhos de hardware contra este "
+             "endpoint especifico (use o ID de uma maquina ONLINE, com "
+             "hardware visivel no web UI).")
     args = parser.parse_args()
     start = time.time()
     if args.debug_probe:
-        debug_probe(os.path.abspath(args.config))
+        debug_probe(os.path.abspath(args.config), probe_endpoint=args.probe_endpoint)
     else:
         run(os.path.abspath(args.config))
     logging.info("Tempo total: %.1fs", time.time() - start)
