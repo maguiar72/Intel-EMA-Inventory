@@ -114,6 +114,54 @@ function group_options(): array {
     return $out;
 }
 
+/**
+ * Traduz um valor cru de coluna do EMA/AMT p/ um rotulo amigavel em pt-BR
+ * e formata datas como dd/mm/aaaa. Centraliza a exibicao usada por todas as
+ * telas e pelos exports, garantindo consistencia. Colunas nao tratadas
+ * retornam o valor original.
+ */
+function friendly_value(string $col, $v): string {
+    $s = trim((string)($v ?? ''));
+    if ($s === '(vazio)') { $s = ''; }   // rotulo usado nas distribuicoes do painel
+    switch ($col) {
+        case 'control_mode':   // Intel AMT Control Mode
+            $map = [
+                '0' => 'Nao ativado',
+                '1' => 'Controle pelo Cliente (CCM)',
+                '2' => 'Controle pelo Administrador (ACM)',
+            ];
+            return $map[$s] ?? ($s === '' ? 'Desconhecido' : 'Codigo ' . $s);
+        case 'power_state':    // Estado de energia do endpoint
+            $map = [
+                '0' => 'Ligado',
+                '1' => 'Em suspensao',
+                '2' => 'Desligado',
+            ];
+            return $map[$s] ?? ($s === '' ? 'Desconhecido' : 'Codigo ' . $s);
+        case 'connection_status':  // IsConnected (agente)
+            $l = strtolower($s);
+            if (in_array($l, ['true', '1', 'connected', 'online'], true))     return 'Conectado';
+            if (in_array($l, ['false', '0', 'disconnected', 'offline'], true)) return 'Desconectado';
+            return $s === '' ? 'Desconhecido' : $s;
+        case 'updated_at':
+        case 'first_collected':
+        case 'last_seen':
+            return fmt_datetime($s);
+    }
+    return $s;
+}
+
+/** Formata 'AAAA-MM-DD HH:MM:SS' -> 'dd/mm/aaaa HH:MM' (pt-BR). */
+function fmt_datetime($v): string {
+    $s = trim((string)($v ?? ''));
+    if ($s === '' || strpos($s, '0000-00-00') === 0) { return ''; }
+    try {
+        return (new DateTime($s))->format('d/m/Y H:i');
+    } catch (Throwable $e) {
+        return $s;
+    }
+}
+
 /** Colunas exibidas na listagem/export (chave da coluna => rotulo). */
 function endpoint_columns(): array {
     return [

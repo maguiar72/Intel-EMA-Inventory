@@ -43,7 +43,7 @@ function render_raw($json) {
   <h2>Resumo</h2>
   <table class="kv">
     <?php foreach (endpoint_columns() as $key=>$lbl): ?>
-      <tr><th><?= e($lbl) ?></th><td><?= e($ep[$key] ?? '') ?></td></tr>
+      <tr><th><?= e($lbl) ?></th><td><?= e(friendly_value($key, $ep[$key] ?? '')) ?></td></tr>
     <?php endforeach; ?>
     <tr><th>Endpoint ID</th><td><?= e($ep['endpoint_id']) ?></td></tr>
   </table>

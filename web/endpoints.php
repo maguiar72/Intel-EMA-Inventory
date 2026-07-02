@@ -34,18 +34,24 @@ unset($qs['p']);
 $baseQs = http_build_query($qs);
 
 function status_badge($col, $val) {
-    $v = strtolower((string)$val);
-    if ($col === 'connection_status') {
-        if (in_array($v, ['connected','online','true','1'])) return '<span class="badge ok">'.e($val).'</span>';
-        if (in_array($v, ['disconnected','offline','false','0'])) return '<span class="badge err">'.e($val).'</span>';
+    // Datas -> dd/mm/aaaa
+    if (in_array($col, ['updated_at', 'first_collected', 'last_seen'], true)) {
+        $d = fmt_datetime($val);
+        return $d === '' ? '<span class="muted">-</span>' : e($d);
     }
-    if ($col === 'power_state') {
-        if (strpos($v,'on') !== false || $v==='s0') return '<span class="badge ok">'.e($val).'</span>';
-        if (strpos($v,'off') !== false) return '<span class="badge na">'.e($val).'</span>';
-    }
-    if ($col === 'control_mode') {
-        if (strpos($v,'admin')!==false || $v==='acm') return '<span class="badge ok">'.e($val).'</span>';
-        if (strpos($v,'client')!==false || $v==='ccm') return '<span class="badge warn">'.e($val).'</span>';
+    // Colunas codificadas -> rotulo amigavel + cor
+    if (in_array($col, ['connection_status', 'power_state', 'control_mode'], true)) {
+        $label = friendly_value($col, $val);
+        $cls = '';
+        if ($col === 'connection_status') {
+            $cls = $label === 'Conectado' ? 'ok' : ($label === 'Desconectado' ? 'err' : '');
+        } elseif ($col === 'power_state') {
+            $cls = $label === 'Ligado' ? 'ok' : ($label === 'Desligado' ? 'na' : 'warn');
+        } elseif ($col === 'control_mode') {
+            $cls = strpos($label, 'ACM') !== false ? 'ok'
+                 : (strpos($label, 'CCM') !== false ? 'warn' : '');
+        }
+        return $cls ? '<span class="badge '.$cls.'">'.e($label).'</span>' : e($label);
     }
     return $val === null || $val === '' ? '<span class="muted">-</span>' : e($val);
 }
@@ -87,8 +93,12 @@ require __DIR__ . '/header.php';
         <label><?= e($lbl) ?></label>
         <select name="<?= e($col) ?>">
           <option value="">Todos</option>
-          <?php foreach (distinct_values($col) as $v): ?>
-            <option value="<?= e($v) ?>" <?= (($_GET[$col]??'')===$v)?'selected':'' ?>><?= e($v) ?></option>
+          <?php
+            $friendly = in_array($col, ['control_mode','power_state','connection_status'], true);
+            foreach (distinct_values($col) as $v):
+              $txt = $friendly ? friendly_value($col, $v) : $v;
+          ?>
+            <option value="<?= e($v) ?>" <?= (($_GET[$col]??'')===$v)?'selected':'' ?>><?= e($txt) ?></option>
           <?php endforeach; ?>
         </select>
       </div>

@@ -34,7 +34,7 @@ if ($format === 'csv') {
     fputcsv($out, array_values($cols), ';');
     foreach ($rows as $r) {
         $line = [];
-        foreach ($cols as $key => $lbl) { $line[] = $r[$key] ?? ''; }
+        foreach ($cols as $key => $lbl) { $line[] = friendly_value($key, $r[$key] ?? ''); }
         fputcsv($out, $line, ';');
     }
     fclose($out);
@@ -79,7 +79,7 @@ header('Content-Type: text/html; charset=utf-8');
 <table>
   <tr><?php foreach ($cols as $lbl): ?><th><?= e($lbl) ?></th><?php endforeach; ?></tr>
   <?php foreach ($rows as $r): ?>
-    <tr><?php foreach ($cols as $key=>$lbl): ?><td><?= e($r[$key] ?? '') ?></td><?php endforeach; ?></tr>
+    <tr><?php foreach ($cols as $key=>$lbl): ?><td><?= e(friendly_value($key, $r[$key] ?? '')) ?></td><?php endforeach; ?></tr>
   <?php endforeach; ?>
 </table>
 </body></html>
@@ -119,7 +119,7 @@ function export_xlsx(array $rows, array $cols, string $fname): void {
             $cell = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($colIndex) . $rowNum;
             $sheet->setCellValueExplicit(
                 $cell,
-                (string)($r[$key] ?? ''),
+                friendly_value($key, $r[$key] ?? ''),
                 \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING
             );
             $colIndex++;
@@ -154,7 +154,7 @@ function export_xls_html(array $rows, array $cols, string $fname): void {
     foreach ($rows as $r) {
         echo '<tr>';
         foreach ($cols as $key => $lbl) {
-            echo '<td style="mso-number-format:\'\@\'">' . e($r[$key] ?? '') . '</td>';
+            echo '<td style="mso-number-format:\'\@\'">' . e(friendly_value($key, $r[$key] ?? '')) . '</td>';
         }
         echo '</tr>';
     }
