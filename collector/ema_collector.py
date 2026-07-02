@@ -610,23 +610,37 @@ def run(config_path):
                 logging.info("Nenhum endpoint conectado no momento; hardware AMT "
                              "(tempo real) nao e coletavel agora.")
             else:
-                logging.info("Coletando hardware AMT em tempo real de %s host(s) "
-                             "conectado(s)...", len(connected_ids))
-                for i, eid in enumerate(connected_ids, 1):
-                    hw = fetch_hardware(client, eid)
-                    if hw:
-                        db.upsert_hardware(eid, hw, run_id)
-                        counts['hardware'] += 1
-                    if i % 50 == 0:
-                        db.commit()
-                        logging.info("  ...hardware %s/%s", i, len(connected_ids))
-                db.commit()
-                logging.info("Hardware coletado: %s de %s conectados",
-                             counts['hardware'], len(connected_ids))
-                if counts['hardware'] == 0:
+                # Canary: 1 chamada p/ detectar cedo falta de permissao (403) ou
+                # caminho ausente (404) e evitar milhares de chamadas inuteis.
+                canary = client.probe(
+                    f"endpoints/{connected_ids[0]}/HardwareInfoFromAmt")
+                st = canary['status']
+                if st in (401, 403):
                     logging.warning(
-                        "Nenhum host conectado retornou hardware. Verifique o "
-                        "caminho com: --debug-probe --probe-endpoint <ID conectado>.")
+                        "Sem permissao p/ ler hardware AMT (HTTP %s em "
+                        "HardwareInfoFromAmt). A conta da API (client_credentials) le "
+                        "o inventario, mas nao possui direitos de manageability/AMT "
+                        "sobre os grupos de endpoints no EMA. Conceda esses direitos a "
+                        "conta no EMA p/ habilitar a coleta de hardware. Pulando etapa.",
+                        st)
+                elif st == 404:
+                    logging.warning(
+                        "HardwareInfoFromAmt indisponivel neste servidor (HTTP 404). "
+                        "Pulando etapa de hardware.")
+                else:
+                    logging.info("Coletando hardware AMT em tempo real de %s host(s) "
+                                 "conectado(s)...", len(connected_ids))
+                    for i, eid in enumerate(connected_ids, 1):
+                        hw = fetch_hardware(client, eid)
+                        if hw:
+                            db.upsert_hardware(eid, hw, run_id)
+                            counts['hardware'] += 1
+                        if i % 50 == 0:
+                            db.commit()
+                            logging.info("  ...hardware %s/%s", i, len(connected_ids))
+                    db.commit()
+                    logging.info("Hardware coletado: %s de %s conectados",
+                                 counts['hardware'], len(connected_ids))
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)
