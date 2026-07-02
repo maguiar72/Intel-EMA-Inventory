@@ -586,12 +586,38 @@ def debug_probe(config_path):
         # referencia: endpoints (sabemos que funciona)
         'endpoints',
     ]
-    logging.info("Sondando %s caminhos candidatos...", len(candidates))
-    logging.info("%-28s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    logging.info("Sondando %s caminhos candidatos (grupos/perfis)...", len(candidates))
+    logging.info("%-32s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
     for path in candidates:
         r = client.probe(path)
-        logging.info("%-28s %-6s %-8s %s",
+        logging.info("%-32s %-6s %-8s %s",
                      r['path'], r['status'],
+                     '-' if r['count'] is None else r['count'],
+                     r['snippet'][:120])
+
+    # Sonda os caminhos de hardware usando um endpoint real como amostra.
+    logging.info("Buscando 1 endpoint de amostra p/ sondar hardware...")
+    sample = client.get_list('endpoints')[:1]
+    if not sample:
+        logging.warning("Nenhum endpoint disponivel p/ sondar hardware.")
+        return
+    eid = pick(sample[0], 'endpointId', 'EndpointId', 'id', 'Id', 'guid')
+    logging.info("Sondando caminhos de hardware p/ endpoint_id=%s", eid)
+    hw_paths = [
+        f"endpoints/{eid}/HardwareInfo",
+        f"endpoints/{eid}/hardwareInfo",
+        f"endpoints/{eid}/hardware",
+        f"endpoints/{eid}/amtHardwareInfo",
+        f"endpoints/{eid}/hardwareInformation",
+        f"endpoints/{eid}/inventory",
+        f"endpoints/{eid}/amtGeneralSettings",
+        f"endpoints/{eid}",
+    ]
+    logging.info("%-40s %-6s %-8s %s", "CAMINHO", "HTTP", "ITENS", "TRECHO")
+    for path in hw_paths:
+        r = client.probe(path)
+        logging.info("%-40s %-6s %-8s %s",
+                     r['path'].split('/', 2)[-1], r['status'],
                      '-' if r['count'] is None else r['count'],
                      r['snippet'][:120])
 
