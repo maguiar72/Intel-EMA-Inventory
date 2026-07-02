@@ -54,8 +54,11 @@ def now():
 def pick(d, *keys, default=None):
     """Retorna o primeiro valor presente e nao-vazio dentre varias chaves.
 
-    Aceita chaves aninhadas com ponto, ex: 'Group.Name'. Torna o coletor
-    resiliente a diferencas de nomenclatura entre versoes da API do EMA.
+    Aceita chaves aninhadas com ponto, ex: 'Group.Name'. A busca e
+    case-INSENSITIVE: o EMA devolve as chaves em PascalCase
+    (EndpointGroupId, AmtProfileId, Name, EndpointCount...), enquanto o
+    coletor as referencia em camelCase. Sem isso, ids de grupo/perfil
+    saem None e os registros sao silenciosamente descartados.
     """
     if not isinstance(d, dict):
         return default
@@ -63,11 +66,18 @@ def pick(d, *keys, default=None):
         cur = d
         ok = True
         for part in key.split('.'):
-            if isinstance(cur, dict) and part in cur:
-                cur = cur[part]
-            else:
+            if not isinstance(cur, dict):
                 ok = False
                 break
+            if part in cur:                      # match exato (mais rapido)
+                cur = cur[part]
+                continue
+            plow = part.lower()                  # fallback case-insensitive
+            match = next((k for k in cur if k.lower() == plow), None)
+            if match is None:
+                ok = False
+                break
+            cur = cur[match]
         if ok and cur not in (None, ""):
             return cur
     return default
