@@ -3,7 +3,14 @@ require_once __DIR__ . '/db.php';
 $active = 'ep';
 
 [$where, $params] = build_endpoint_filter($_GET);
-$cols = endpoint_columns();
+$cols = endpoint_list_columns();
+
+// Ordenacao clicavel nos cabecalhos. A coluna e validada contra a lista de
+// colunas exibidas (whitelist), evitando injecao no ORDER BY.
+$sortable = array_keys($cols);
+$sort = in_array(($_GET['sort'] ?? ''), $sortable, true) ? (string)$_GET['sort'] : 'name';
+$dir  = (strtolower($_GET['dir'] ?? 'asc') === 'desc') ? 'desc' : 'asc';
+$order = "ORDER BY `$sort` $dir" . ($sort !== 'name' ? ', name ASC' : '');
 
 // Paginacao
 $pageSize = (int) cfg()['page_size'];
@@ -18,7 +25,7 @@ try {
     $stmt->execute($params);
     $total = (int) $stmt->fetchColumn();
 
-    $sql = "SELECT * FROM endpoints $where ORDER BY name LIMIT $pageSize OFFSET $offset";
+    $sql = "SELECT * FROM endpoints $where $order LIMIT $pageSize OFFSET $offset";
     $stmt = db()->prepare($sql);
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
@@ -32,6 +39,17 @@ $totalPages = max(1, (int)ceil($total / $pageSize));
 $qs = $_GET;
 unset($qs['p']);
 $baseQs = http_build_query($qs);
+
+/** Cabecalho clicavel que ordena pela coluna (alterna asc/desc). */
+function sort_header(string $col, string $label, string $sort, string $dir): string {
+    $q = $_GET;
+    $q['sort'] = $col;
+    $q['dir']  = ($sort === $col && $dir === 'asc') ? 'desc' : 'asc';
+    unset($q['p']);                       // volta p/ a 1a pagina ao reordenar
+    $arrow = $sort === $col ? ($dir === 'asc' ? ' &#9650;' : ' &#9660;') : '';
+    $url = 'endpoints.php?' . http_build_query($q);
+    return '<a class="sort" href="' . e($url) . '">' . e($label) . $arrow . '</a>';
+}
 
 function status_badge($col, $val) {
     // Datas -> dd/mm/aaaa
@@ -124,7 +142,7 @@ require __DIR__ . '/header.php';
 <table class="grid">
   <thead>
     <tr>
-      <?php foreach ($cols as $key=>$lbl): ?><th><?= e($lbl) ?></th><?php endforeach; ?>
+      <?php foreach ($cols as $key=>$lbl): ?><th><?= sort_header($key, $lbl, $sort, $dir) ?></th><?php endforeach; ?>
       <th></th>
     </tr>
   </thead>

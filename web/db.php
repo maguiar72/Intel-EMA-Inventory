@@ -225,3 +225,22 @@ function endpoint_columns(): array {
         'updated_at'        => 'Atualizado em',
     ];
 }
+
+/**
+ * Colunas da LISTAGEM (compacta, cabe sem scroll lateral). Omite
+ * domain/os_desc/ip_address/mac_address, que a API do EMA nao fornece p/
+ * estes endpoints (sempre vazias). Detalhe e export usam o conjunto completo.
+ */
+function endpoint_list_columns(): array {
+    return [
+        'name'              => 'Nome',
+        'fqdn'              => 'FQDN',
+        'amt_version'       => 'Versao AMT',
+        'control_mode'      => 'Modo de Controle',
+        'power_state'       => 'Energia',
+        'connection_status' => 'Conexao',
+        'provisioning_state'=> 'Provisionamento',
+        'group_name'        => 'Grupo',
+        'updated_at'        => 'Atualizado em',
+    ];
+}
