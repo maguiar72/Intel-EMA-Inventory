@@ -25,6 +25,7 @@ Agende via cron (ver ema-inventory.cron).
 """
 
 import argparse
+import concurrent.futures
 import configparser
 import datetime
 import json
@@ -675,19 +676,35 @@ def run(config_path):
                         "HardwareInfoFromAmt indisponivel neste servidor (HTTP 404). "
                         "Pulando etapa de hardware.")
                 else:
+                    workers = max(1, cfg['ema'].getint('hardware_workers', fallback=16))
+                    total = len(connected_ids)
                     logging.info("Coletando hardware AMT em tempo real de %s host(s) "
-                                 "conectado(s)...", len(connected_ids))
-                    for i, eid in enumerate(connected_ids, 1):
-                        hw = fetch_hardware(client, eid)
-                        if hw:
-                            db.upsert_hardware(eid, hw, run_id)
-                            counts['hardware'] += 1
-                        if i % 50 == 0:
-                            db.commit()
-                            logging.info("  ...hardware %s/%s", i, len(connected_ids))
+                                 "conectado(s) com %s threads...", total, workers)
+                    # As consultas AMT (I/O-bound) rodam em paralelo; as gravacoes
+                    # no banco ficam nesta thread (pymysql nao e thread-safe numa
+                    # unica conexao).
+                    done = 0
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                        futures = {ex.submit(fetch_hardware, client, eid): eid
+                                   for eid in connected_ids}
+                        for fut in concurrent.futures.as_completed(futures):
+                            eid = futures[fut]
+                            done += 1
+                            try:
+                                hw = fut.result()
+                            except Exception as exc:  # noqa: BLE001
+                                hw = None
+                                logging.debug("hardware falhou p/ %s: %s", eid, exc)
+                            if hw:
+                                db.upsert_hardware(eid, hw, run_id)
+                                counts['hardware'] += 1
+                            if done % 100 == 0:
+                                db.commit()
+                                logging.info("  ...hardware %s/%s (coletados: %s)",
+                                             done, total, counts['hardware'])
                     db.commit()
                     logging.info("Hardware coletado: %s de %s conectados",
-                                 counts['hardware'], len(connected_ids))
+                                 counts['hardware'], total)
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)
