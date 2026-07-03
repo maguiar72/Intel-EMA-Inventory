@@ -45,6 +45,12 @@ form.filters input,form.filters select{padding:7px 9px;border:1px solid var(--bo
 
 .exports{display:flex;gap:8px;margin:12px 0}
 
+form.hw-refresh{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.notice{padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:14px;border:1px solid transparent}
+.notice.ok{background:#e7f6ec;border-color:#b8e6c6;color:#12692f}
+.notice.warn{background:#fff6e5;border-color:#ffe0a3;color:#7a5200}
+.notice.err{background:#fdecea;border-color:#f6c9c4;color:#8a1c12}
+
 table.grid{width:100%;border-collapse:collapse;background:var(--card);
   border:1px solid var(--border);border-radius:10px;overflow:hidden}
 table.grid th,table.grid td{padding:9px 11px;border-bottom:1px solid var(--border);

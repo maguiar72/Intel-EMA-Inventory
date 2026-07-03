@@ -56,10 +56,38 @@ function render_raw($json) {
 
 <div class="panel">
   <h2>Inventario de Hardware</h2>
+
+  <?php
+    // Mensagem de status do botao "Atualizar hardware agora".
+    $hwMsgs = [
+      'ok'          => ['ok',  'Hardware atualizado com sucesso a partir do Intel EMA.'],
+      'empty'       => ['warn','O Intel EMA nao retornou hardware. O dispositivo provavelmente esta offline ou com o AMT desconectado no momento (o dado e lido em tempo real).'],
+      'unavailable' => ['warn','Nao foi possivel obter o hardware deste dispositivo agora (host offline / AMT indisponivel).'],
+      'forbidden'   => ['err', 'Sem permissao para ler hardware AMT. A credencial do EMA precisa do scope EndpointManager.'],
+      'noconfig'    => ['err', 'Conexao com o Intel EMA nao configurada. Preencha [ema] client_id/client_secret em config.php.'],
+      'notfound'    => ['err', 'Dispositivo nao encontrado.'],
+      'error'       => ['err', 'Falha ao consultar o Intel EMA. Verifique credenciais, rede e o log do servidor web.'],
+    ];
+    $hwKey = $_GET['hw'] ?? '';
+    if (isset($hwMsgs[$hwKey])):
+      [$cls, $txt] = $hwMsgs[$hwKey];
+  ?>
+    <div class="notice <?= e($cls) ?>"><?= e($txt) ?></div>
+  <?php endif; ?>
+
+  <?php if (!empty(cfg()['ema']['client_id']) || !empty(cfg()['ema']['username'])): ?>
+    <form method="post" action="refresh_hardware.php" class="hw-refresh">
+      <input type="hidden" name="id" value="<?= e($ep['endpoint_id']) ?>">
+      <button class="btn" type="submit">&#128260; Atualizar hardware agora (consultar Intel EMA)</button>
+      <span class="muted">Consulta o AMT em tempo real; funciona apenas se o dispositivo estiver conectado.</span>
+    </form>
+  <?php endif; ?>
+
   <?php if ($hw): ?>
+    <p class="muted">Atualizado em <?= e(fmt_datetime($hw['updated_at'] ?? '')) ?></p>
     <?php render_raw($hw['raw']); ?>
   <?php else: ?>
-    <p class="muted">Sem inventario de hardware coletado para este dispositivo.</p>
+    <p class="muted">Sem inventario de hardware coletado para este dispositivo. Use o botao acima para consultar o Intel EMA agora.</p>
   <?php endif; ?>
 </div>
 
