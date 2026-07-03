@@ -61,12 +61,21 @@ function build_endpoint_filter(array $q): array {
     $where = [];
     $params = [];
 
-    // Busca livre (nome, fqdn, ip, mac, dominio)
+    // Busca livre (nome, fqdn, ip, mac, dominio). Cada ocorrencia usa um
+    // placeholder proprio: com prepares nativos (EMULATE_PREPARES=false) o
+    // MySQL nao permite reusar o mesmo nome -> SQLSTATE[HY093].
     $term = trim($q['search'] ?? '');
     if ($term !== '') {
-        $where[] = '(name LIKE :t OR fqdn LIKE :t OR ip_address LIKE :t '
-                 . 'OR mac_address LIKE :t OR domain LIKE :t OR endpoint_id LIKE :t)';
-        $params[':t'] = '%' . $term . '%';
+        $where[] = '(name LIKE :t_name OR fqdn LIKE :t_fqdn OR ip_address LIKE :t_ip '
+                 . 'OR mac_address LIKE :t_mac OR domain LIKE :t_domain '
+                 . 'OR endpoint_id LIKE :t_eid)';
+        $like = '%' . $term . '%';
+        $params[':t_name']   = $like;
+        $params[':t_fqdn']   = $like;
+        $params[':t_ip']     = $like;
+        $params[':t_mac']    = $like;
+        $params[':t_domain'] = $like;
+        $params[':t_eid']    = $like;
     }
 
     // Filtros exatos por coluna
