@@ -152,10 +152,46 @@ function friendly_value(string $col, $v): string {
             if (in_array($l, ['true', '1', 'connected', 'online'], true))     return 'Conectado';
             if (in_array($l, ['false', '0', 'disconnected', 'offline'], true)) return 'Desconectado';
             return $s === '' ? 'Desconhecido' : $s;
+        case 'provisioning_state':  // Intel AMT Provisioning State
+            $map = [
+                '0' => 'Nao provisionado',
+                '1' => 'Em provisionamento',
+                '2' => 'Provisionado',
+            ];
+            return $map[$s] ?? ($s === '' ? 'Desconhecido' : 'Codigo ' . $s);
         case 'updated_at':
         case 'first_collected':
         case 'last_seen':
             return fmt_datetime($s);
+    }
+    return $s;
+}
+
+/**
+ * Traduz um par chave/valor do JSON bruto (tabela "Dados completos") para
+ * exibicao amigavel: booleanos -> Verdadeiro/Falso e chaves codificadas
+ * conhecidas (PowerState, AmtControlMode, AmtProvisioningState) -> rotulo.
+ */
+function friendly_raw_value(string $key, $value): string {
+    if (is_bool($value)) {
+        return $value ? 'Verdadeiro' : 'Falso';
+    }
+    $s = (string) $value;
+    $low = strtolower(trim($s));
+    if ($low === 'true')  { return 'Verdadeiro'; }
+    if ($low === 'false') { return 'Falso'; }
+
+    // Usa o ultimo segmento da chave achatada (ex.: "Group.PowerState" -> "PowerState").
+    $leaf = ($pos = strrpos($key, '.')) !== false ? substr($key, $pos + 1) : $key;
+    $coded = [
+        'PowerState'           => 'power_state',
+        'AmtControlMode'       => 'control_mode',
+        'ControlMode'          => 'control_mode',
+        'AmtProvisioningState' => 'provisioning_state',
+        'ProvisioningState'    => 'provisioning_state',
+    ];
+    if (isset($coded[$leaf]) && $s !== '') {
+        return friendly_value($coded[$leaf], $s);
     }
     return $s;
 }
