@@ -196,6 +196,14 @@ class EmaClient:
         self.page_size = cfg.getint('page_size', fallback=200)
         self.timeout = cfg.getint('timeout', fallback=60)
         self.session = requests.Session()
+        # Dimensiona o pool de conexoes ao paralelismo do hardware, senao o
+        # urllib3 loga "Connection pool is full, discarding connection" e
+        # reabre conexoes a cada requisicao excedente.
+        pool = max(10, cfg.getint('hardware_workers', fallback=16) + 4)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=pool,
+                                                pool_maxsize=pool)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         self.token = None
         if not self.verify:
             requests.packages.urllib3.disable_warnings()
