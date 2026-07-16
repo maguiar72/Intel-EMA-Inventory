@@ -99,48 +99,52 @@ def fetch_audit(client, acfg, cursor_iso):
     lidando com paginacao e deduplicando por id. Retorna lista de eventos.
     """
     path = acfg.get('path', fallback='auditEvents')
-    page_size = acfg.getint('page_size', fallback=500)
-    top_param = acfg.get('top_param', fallback='$top')
-    skip_param = acfg.get('skip_param', fallback='$skip')
-    from_param = acfg.get('from_param', fallback='startDate').strip()
+    from_param = acfg.get('from_param', fallback='startDateTime').strip()
+    # O AuditEvents do EMA NAO pagina: estreita-se por intervalo de data
+    # (startDateTime/endDateTime) e ele devolve tudo do intervalo. Deixe
+    # paginate=false (padrao). paginate=true fica p/ outras versoes de API.
+    paginate = acfg.getboolean('paginate', fallback=False)
+
+    base_params = {}
+    if from_param and cursor_iso:
+        base_params[from_param] = cursor_iso
 
     collected = []
-    seen = set()
-    skip = 0
-    page = 1
-    while True:
-        params = {top_param: page_size, skip_param: skip}
-        if from_param and cursor_iso:
-            params[from_param] = cursor_iso
-        data = client.get(path, params=params)
-        items = client._extract_list(data)
-        if not items:
-            break
-        new = 0
-        for ev in items:
-            key = doc_id(ev)
-            if key in seen:
-                continue
-            seen.add(key)
-            collected.append(ev)
-            new += 1
-        if new == 0:                      # so duplicatas -> servidor nao pagina
-            break
-        # Se o servidor devolveu MUITO mais que o pedido, ele ignora a
-        # paginacao (retorna tudo de uma vez) -> nao adianta paginar.
-        if len(items) > page_size:
-            break
-        if len(items) < page_size:
-            break
-        skip += page_size
-        page += 1
-        if page > 100000:                 # trava de seguranca
-            logging.warning("Paginacao de auditoria excedeu o limite.")
-            break
+    if not paginate:
+        collected = list(client._extract_list(client.get(path, params=base_params)))
+    else:
+        page_size = acfg.getint('page_size', fallback=500)
+        top_param = acfg.get('top_param', fallback='$top')
+        skip_param = acfg.get('skip_param', fallback='$skip')
+        seen = set()
+        skip = 0
+        page = 1
+        while True:
+            params = dict(base_params)
+            params[top_param] = page_size
+            params[skip_param] = skip
+            items = client._extract_list(client.get(path, params=params))
+            if not items:
+                break
+            new = 0
+            for ev in items:
+                key = doc_id(ev)
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(ev)
+                new += 1
+            if new == 0 or len(items) != page_size:
+                break
+            skip += page_size
+            page += 1
+            if page > 100000:
+                logging.warning("Paginacao de auditoria excedeu o limite.")
+                break
 
-    # Rede de seguranca: filtra por cursor no cliente, caso o servidor tenha
-    # ignorado o filtro de data (from_param). Usa >= p/ nao perder eventos de
-    # mesmo horario no limite (a idempotencia por _id evita duplicata).
+    # Rede de seguranca: filtra por cursor no cliente, caso o servidor ignore
+    # o filtro de data. Usa >= p/ nao perder eventos de mesmo horario no limite
+    # (a idempotencia por _id evita duplicata).
     if cursor_iso:
         collected = [ev for ev in collected
                      if str(event_time(ev) or '') >= cursor_iso]
