@@ -248,6 +248,9 @@ def run(config_path, do_probe=False):
     if not cfg.has_section('opensearch'):
         sys.exit("Falta a secao [opensearch] no config (veja config.example.ini).")
     oscfg = cfg['opensearch']
+    if not oscfg.getboolean('verify_ssl', fallback=True):
+        # Silencia o aviso de TLS nao verificado (OpenSearch com cert self-signed).
+        requests.packages.urllib3.disable_warnings()
 
     state_file = acfg.get('state_file', fallback='ema_audit_state.json')
     if not os.path.isabs(state_file):
