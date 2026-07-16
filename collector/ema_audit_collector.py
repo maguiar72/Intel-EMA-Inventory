@@ -126,6 +126,10 @@ def fetch_audit(client, acfg, cursor_iso):
             new += 1
         if new == 0:                      # so duplicatas -> servidor nao pagina
             break
+        # Se o servidor devolveu MUITO mais que o pedido, ele ignora a
+        # paginacao (retorna tudo de uma vez) -> nao adianta paginar.
+        if len(items) > page_size:
+            break
         if len(items) < page_size:
             break
         skip += page_size
@@ -133,6 +137,13 @@ def fetch_audit(client, acfg, cursor_iso):
         if page > 100000:                 # trava de seguranca
             logging.warning("Paginacao de auditoria excedeu o limite.")
             break
+
+    # Rede de seguranca: filtra por cursor no cliente, caso o servidor tenha
+    # ignorado o filtro de data (from_param). Usa >= p/ nao perder eventos de
+    # mesmo horario no limite (a idempotencia por _id evita duplicata).
+    if cursor_iso:
+        collected = [ev for ev in collected
+                     if str(event_time(ev) or '') >= cursor_iso]
     return collected
 
 
