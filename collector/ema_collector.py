@@ -25,6 +25,7 @@ Agende via cron (ver ema-inventory.cron).
 """
 
 import argparse
+import concurrent.futures
 import configparser
 import datetime
 import json
@@ -122,6 +123,58 @@ def is_connected(ep):
     return bool(pick(ep, 'isConnected')) or bool(pick(ep, 'isCiraConnected'))
 
 
+def extract_hardware_fields(hw):
+    """Extrai as colunas indexadas do JSON do HardwareInfoFromAmt.
+
+    O JSON e aninhado; CPU, memoria e armazenamento vem como LISTAS:
+      AmtPlatformInfo.{ManufacturerName,ComputerModel,SerialNumber}
+      AmtBiosInfo.VersionNumber
+      AmtProcessorInfo[].Version            (lista; usa o 1o)
+      AmtMemoryModuleInfo[].Size (KB)       (lista; soma -> GB)
+    O `raw` continua guardando o objeto completo.
+    """
+    if not isinstance(hw, dict):
+        hw = {}
+
+    # CPU: 1o processador da lista (com fallback p/ formatos planos).
+    cpu = None
+    procs = hw.get('AmtProcessorInfo')
+    if isinstance(procs, list) and procs and isinstance(procs[0], dict):
+        cpu = pick(procs[0], 'Version', 'ProcessorName', 'ManufacturerName')
+    if not cpu:
+        cpu = pick(hw, 'processor', 'cpu', 'processorName', 'cpuDescription')
+
+    # Memoria: soma o Size (KB) dos modulos e converte p/ GB.
+    total_mem = None
+    mods = hw.get('AmtMemoryModuleInfo')
+    if isinstance(mods, list) and mods:
+        total_kb = sum(m.get('Size') for m in mods
+                       if isinstance(m, dict) and isinstance(m.get('Size'), (int, float)))
+        if total_kb > 0:
+            gb = total_kb / (1024 * 1024)
+            total_mem = (f"{gb:.0f} GB" if abs(gb - round(gb)) < 0.05
+                         else f"{gb:.1f} GB")
+    if not total_mem:
+        total_mem = pick(hw, 'totalMemory', 'memory', 'installedMemory', 'ramSize')
+
+    return {
+        'manufacturer': as_text(pick(hw,
+            'AmtPlatformInfo.ManufacturerName', 'AmtBaseBoardInfo.ManufacturerName',
+            'manufacturer', 'Manufacturer', 'systemManufacturer')),
+        'model': as_text(pick(hw,
+            'AmtPlatformInfo.ComputerModel', 'AmtBaseBoardInfo.ProductName',
+            'model', 'Model', 'systemModel', 'productName')),
+        'serial_number': as_text(pick(hw,
+            'AmtPlatformInfo.SerialNumber', 'AmtBaseBoardInfo.SerialNumber',
+            'serialNumber', 'SerialNumber', 'serial')),
+        'bios_version': as_text(pick(hw,
+            'AmtBiosInfo.VersionNumber', 'AmtBiosInfo.Version',
+            'biosVersion', 'BiosVersion', 'biosVersionString')),
+        'cpu_desc': as_text(cpu),
+        'total_memory': as_text(total_mem),
+    }
+
+
 # ---------------------------------------------------------------------------
 #  Cliente da API EMA
 # ---------------------------------------------------------------------------
@@ -143,6 +196,14 @@ class EmaClient:
         self.page_size = cfg.getint('page_size', fallback=200)
         self.timeout = cfg.getint('timeout', fallback=60)
         self.session = requests.Session()
+        # Dimensiona o pool de conexoes ao paralelismo do hardware, senao o
+        # urllib3 loga "Connection pool is full, discarding connection" e
+        # reabre conexoes a cada requisicao excedente.
+        pool = max(10, cfg.getint('hardware_workers', fallback=16) + 4)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=pool,
+                                                pool_maxsize=pool)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         self.token = None
         if not self.verify:
             requests.packages.urllib3.disable_warnings()
@@ -502,18 +563,13 @@ class Db:
         return True
 
     def upsert_hardware(self, endpoint_id, hw, run_id):
-        vals = {
+        vals = extract_hardware_fields(hw)
+        vals.update({
             'endpoint_id': str(endpoint_id),
-            'manufacturer': as_text(pick(hw, 'manufacturer', 'Manufacturer', 'systemManufacturer')),
-            'model': as_text(pick(hw, 'model', 'Model', 'systemModel', 'productName')),
-            'serial_number': as_text(pick(hw, 'serialNumber', 'SerialNumber', 'serial')),
-            'bios_version': as_text(pick(hw, 'biosVersion', 'BiosVersion', 'biosVersionString')),
-            'cpu_desc': as_text(pick(hw, 'processor', 'cpu', 'processorName', 'cpuDescription')),
-            'total_memory': as_text(pick(hw, 'totalMemory', 'memory', 'installedMemory', 'ramSize')),
             'raw': json.dumps(hw, ensure_ascii=False),
             'ts': now(),
             'run_id': run_id,
-        }
+        })
         sql = """
         INSERT INTO hardware_inventory
           (endpoint_id, manufacturer, model, serial_number, bios_version,
@@ -628,19 +684,35 @@ def run(config_path):
                         "HardwareInfoFromAmt indisponivel neste servidor (HTTP 404). "
                         "Pulando etapa de hardware.")
                 else:
+                    workers = max(1, cfg['ema'].getint('hardware_workers', fallback=16))
+                    total = len(connected_ids)
                     logging.info("Coletando hardware AMT em tempo real de %s host(s) "
-                                 "conectado(s)...", len(connected_ids))
-                    for i, eid in enumerate(connected_ids, 1):
-                        hw = fetch_hardware(client, eid)
-                        if hw:
-                            db.upsert_hardware(eid, hw, run_id)
-                            counts['hardware'] += 1
-                        if i % 50 == 0:
-                            db.commit()
-                            logging.info("  ...hardware %s/%s", i, len(connected_ids))
+                                 "conectado(s) com %s threads...", total, workers)
+                    # As consultas AMT (I/O-bound) rodam em paralelo; as gravacoes
+                    # no banco ficam nesta thread (pymysql nao e thread-safe numa
+                    # unica conexao).
+                    done = 0
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                        futures = {ex.submit(fetch_hardware, client, eid): eid
+                                   for eid in connected_ids}
+                        for fut in concurrent.futures.as_completed(futures):
+                            eid = futures[fut]
+                            done += 1
+                            try:
+                                hw = fut.result()
+                            except Exception as exc:  # noqa: BLE001
+                                hw = None
+                                logging.debug("hardware falhou p/ %s: %s", eid, exc)
+                            if hw:
+                                db.upsert_hardware(eid, hw, run_id)
+                                counts['hardware'] += 1
+                            if done % 100 == 0:
+                                db.commit()
+                                logging.info("  ...hardware %s/%s (coletados: %s)",
+                                             done, total, counts['hardware'])
                     db.commit()
                     logging.info("Hardware coletado: %s de %s conectados",
-                                 counts['hardware'], len(connected_ids))
+                                 counts['hardware'], total)
 
         db.finish_run(run_id, 'ok', counts)
         logging.info("Coleta concluida com sucesso: %s", counts)

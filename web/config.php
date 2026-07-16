@@ -18,6 +18,26 @@ return [
     'page_size' => 50,
 
     // -----------------------------------------------------------------
+    //  Conexao com o Intel EMA para o botao "Atualizar hardware agora"
+    //  da tela de detalhe (consulta o AMT em tempo real e grava no banco).
+    //  Use uma credencial Client Credentials com scope EndpointManager.
+    //  Deixe client_id/client_secret vazios para desabilitar o botao.
+    // -----------------------------------------------------------------
+    'ema' => [
+        'base_url'      => 'https://ema.trf3.jus.br',
+        'auth_flow'     => 'client_credentials',   // ou 'password'
+        'client_id'     => '',                     // GUID da credencial
+        'client_secret' => '',
+        'scope'         => '',                     // opcional
+        // Para auth_flow='password':
+        'username'      => '',
+        'password'      => '',
+        'api_version'   => 'latest',
+        'verify_ssl'    => true,
+        'timeout'       => 60,
+    ],
+
+    // -----------------------------------------------------------------
     //  Autenticacao do painel
     //  mode:
     //    'none'  -> sem autenticacao (use so em rede interna confiavel)

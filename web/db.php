@@ -61,12 +61,21 @@ function build_endpoint_filter(array $q): array {
     $where = [];
     $params = [];
 
-    // Busca livre (nome, fqdn, ip, mac, dominio)
+    // Busca livre (nome, fqdn, ip, mac, dominio). Cada ocorrencia usa um
+    // placeholder proprio: com prepares nativos (EMULATE_PREPARES=false) o
+    // MySQL nao permite reusar o mesmo nome -> SQLSTATE[HY093].
     $term = trim($q['search'] ?? '');
     if ($term !== '') {
-        $where[] = '(name LIKE :t OR fqdn LIKE :t OR ip_address LIKE :t '
-                 . 'OR mac_address LIKE :t OR domain LIKE :t OR endpoint_id LIKE :t)';
-        $params[':t'] = '%' . $term . '%';
+        $where[] = '(name LIKE :t_name OR fqdn LIKE :t_fqdn OR ip_address LIKE :t_ip '
+                 . 'OR mac_address LIKE :t_mac OR domain LIKE :t_domain '
+                 . 'OR endpoint_id LIKE :t_eid)';
+        $like = '%' . $term . '%';
+        $params[':t_name']   = $like;
+        $params[':t_fqdn']   = $like;
+        $params[':t_ip']     = $like;
+        $params[':t_mac']    = $like;
+        $params[':t_domain'] = $like;
+        $params[':t_eid']    = $like;
     }
 
     // Filtros exatos por coluna
@@ -143,10 +152,46 @@ function friendly_value(string $col, $v): string {
             if (in_array($l, ['true', '1', 'connected', 'online'], true))     return 'Conectado';
             if (in_array($l, ['false', '0', 'disconnected', 'offline'], true)) return 'Desconectado';
             return $s === '' ? 'Desconhecido' : $s;
+        case 'provisioning_state':  // Intel AMT Provisioning State
+            $map = [
+                '0' => 'Nao provisionado',
+                '1' => 'Em provisionamento',
+                '2' => 'Provisionado',
+            ];
+            return $map[$s] ?? ($s === '' ? 'Desconhecido' : 'Codigo ' . $s);
         case 'updated_at':
         case 'first_collected':
         case 'last_seen':
             return fmt_datetime($s);
+    }
+    return $s;
+}
+
+/**
+ * Traduz um par chave/valor do JSON bruto (tabela "Dados completos") para
+ * exibicao amigavel: booleanos -> Verdadeiro/Falso e chaves codificadas
+ * conhecidas (PowerState, AmtControlMode, AmtProvisioningState) -> rotulo.
+ */
+function friendly_raw_value(string $key, $value): string {
+    if (is_bool($value)) {
+        return $value ? 'Verdadeiro' : 'Falso';
+    }
+    $s = (string) $value;
+    $low = strtolower(trim($s));
+    if ($low === 'true')  { return 'Verdadeiro'; }
+    if ($low === 'false') { return 'Falso'; }
+
+    // Usa o ultimo segmento da chave achatada (ex.: "Group.PowerState" -> "PowerState").
+    $leaf = ($pos = strrpos($key, '.')) !== false ? substr($key, $pos + 1) : $key;
+    $coded = [
+        'PowerState'           => 'power_state',
+        'AmtControlMode'       => 'control_mode',
+        'ControlMode'          => 'control_mode',
+        'AmtProvisioningState' => 'provisioning_state',
+        'ProvisioningState'    => 'provisioning_state',
+    ];
+    if (isset($coded[$leaf]) && $s !== '') {
+        return friendly_value($coded[$leaf], $s);
     }
     return $s;
 }
@@ -171,6 +216,25 @@ function endpoint_columns(): array {
         'os_desc'           => 'Sistema Operacional',
         'ip_address'        => 'IP',
         'mac_address'       => 'MAC',
+        'amt_version'       => 'Versao AMT',
+        'control_mode'      => 'Modo de Controle',
+        'power_state'       => 'Energia',
+        'connection_status' => 'Conexao',
+        'provisioning_state'=> 'Provisionamento',
+        'group_name'        => 'Grupo',
+        'updated_at'        => 'Atualizado em',
+    ];
+}
+
+/**
+ * Colunas da LISTAGEM (compacta, cabe sem scroll lateral). Omite
+ * domain/os_desc/ip_address/mac_address, que a API do EMA nao fornece p/
+ * estes endpoints (sempre vazias). Detalhe e export usam o conjunto completo.
+ */
+function endpoint_list_columns(): array {
+    return [
+        'name'              => 'Nome',
+        'fqdn'              => 'FQDN',
         'amt_version'       => 'Versao AMT',
         'control_mode'      => 'Modo de Controle',
         'power_state'       => 'Energia',
